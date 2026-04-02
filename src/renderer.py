@@ -1,6 +1,6 @@
-"""HTML renderer — generates static pages from templates."""
+"""HTML renderer — generates a single scrollable feed page."""
 
-import os
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,43 +8,32 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup
 
-from src.config import Article
+from src.config import Article, FEED_HISTORY_DAYS
 
 PROJECT_ROOT = Path(__file__).parent.parent
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 OUTPUT_DIR = PROJECT_ROOT / "output"
+DATA_FILE = OUTPUT_DIR / "articles.json"
 
 
 def _markdown_to_html(md: str) -> str:
-    """Simple markdown to HTML conversion (no external dependency)."""
+    """Simple markdown to HTML conversion."""
     html = md
-
-    # Headers
     html = re.sub(r"^### (.+)$", r"<h3>\1</h3>", html, flags=re.MULTILINE)
     html = re.sub(r"^## (.+)$", r"<h2>\1</h2>", html, flags=re.MULTILINE)
     html = re.sub(r"^# (.+)$", r"<h1>\1</h1>", html, flags=re.MULTILINE)
-
-    # Bold and italic
     html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
     html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
-
-    # Links
     html = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2" target="_blank" rel="noopener">\1</a>', html)
-
-    # Horizontal rules
     html = re.sub(r"^---+$", "<hr>", html, flags=re.MULTILINE)
-
-    # Blockquotes
     html = re.sub(r"^> (.+)$", r"<blockquote>\1</blockquote>", html, flags=re.MULTILINE)
 
-    # Unordered lists — group consecutive lines
     def replace_ul(match: re.Match) -> str:
         items = re.findall(r"^[-*] (.+)$", match.group(0), re.MULTILINE)
         li = "".join(f"<li>{item}</li>" for item in items)
         return f"<ul>{li}</ul>"
     html = re.sub(r"(^[-*] .+\n?)+", replace_ul, html, flags=re.MULTILINE)
 
-    # Paragraphs — wrap remaining text blocks
     blocks = html.split("\n\n")
     processed = []
     for block in blocks:
@@ -55,47 +44,89 @@ def _markdown_to_html(md: str) -> str:
             processed.append(block)
         else:
             processed.append(f"<p>{block}</p>")
-
     return "\n".join(processed)
 
 
-def render_daily(briefing_md: str, articles: list[Article], date: datetime | None = None) -> str:
-    """Render the daily digest HTML page."""
-    if date is None:
-        date = datetime.now(timezone.utc)
+def _article_to_dict(a: Article) -> dict:
+    return {
+        "title": a.title,
+        "url": a.url,
+        "source": a.source,
+        "summary": a.summary,
+        "date": a.date.isoformat() if a.date else None,
+        "author": a.author,
+        "is_tweet": a.is_tweet,
+    }
 
-    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
-    template = env.get_template("daily.html")
 
-    briefing_html = _markdown_to_html(briefing_md)
-
-    return template.render(
-        date_display=date.strftime("%B %d, %Y"),
-        date_iso=date.strftime("%Y-%m-%d"),
-        briefing_html=Markup(briefing_html),
-        articles=articles,
+def _dict_to_article(d: dict) -> Article:
+    return Article(
+        title=d["title"],
+        url=d["url"],
+        source=d["source"],
+        summary=d["summary"],
+        date=datetime.fromisoformat(d["date"]) if d.get("date") else None,
+        author=d.get("author", ""),
+        is_tweet=d.get("is_tweet", False),
     )
 
 
-def render_index(digests: list[dict]) -> str:
-    """Render the index page listing all daily digests."""
-    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
-    template = env.get_template("index.html")
-    return template.render(digests=digests)
+def _load_history() -> dict:
+    """Load stored article history. Structure: { "YYYY-MM-DD": { "articles": [...], "briefing": "..." } }"""
+    if DATA_FILE.exists():
+        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    return {}
+
+
+def _save_history(history: dict):
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DATA_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _prune_history(history: dict) -> dict:
+    """Keep only the last N days."""
+    sorted_dates = sorted(history.keys(), reverse=True)
+    pruned = {}
+    for date_key in sorted_dates[:FEED_HISTORY_DAYS]:
+        pruned[date_key] = history[date_key]
+    return pruned
 
 
 def save_daily(briefing_md: str, articles: list[Article], date: datetime | None = None) -> Path:
-    """Render and save a daily digest, then update the index."""
+    """Add today's articles to history and render the full feed page."""
     if date is None:
         date = datetime.now(timezone.utc)
 
     date_str = date.strftime("%Y-%m-%d")
 
-    # Ensure output directories exist
-    daily_dir = OUTPUT_DIR / date_str
-    daily_dir.mkdir(parents=True, exist_ok=True)
+    # Load existing history and add today
+    history = _load_history()
+    history[date_str] = {
+        "articles": [_article_to_dict(a) for a in articles],
+        "briefing": briefing_md,
+    }
+    history = _prune_history(history)
+    _save_history(history)
 
-    # Copy static assets to output
+    # Build template data: list of days, newest first
+    days = []
+    for day_key in sorted(history.keys(), reverse=True):
+        day_data = history[day_key]
+        day_date = datetime.strptime(day_key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        day_articles = [_dict_to_article(d) for d in day_data["articles"]]
+        briefing_raw = day_data.get("briefing", "")
+        has_real_briefing = briefing_raw and "AI summary unavailable" not in briefing_raw
+        days.append({
+            "date_key": day_key,
+            "date_display": day_date.strftime("%A, %B %d"),
+            "is_today": day_key == date_str,
+            "briefing_html": Markup(_markdown_to_html(briefing_raw)) if has_real_briefing else "",
+            "has_real_briefing": has_real_briefing,
+            "articles": day_articles,
+            "count": len(day_articles),
+        })
+
+    # Copy static assets
     static_src = PROJECT_ROOT / "static"
     static_dst = OUTPUT_DIR / "static"
     static_dst.mkdir(parents=True, exist_ok=True)
@@ -103,24 +134,20 @@ def save_daily(briefing_md: str, articles: list[Article], date: datetime | None 
         if f.is_file():
             (static_dst / f.name).write_bytes(f.read_bytes())
 
-    # Render and save daily page
-    html = render_daily(briefing_md, articles, date)
-    daily_file = daily_dir / "index.html"
-    daily_file.write_text(html, encoding="utf-8")
-    print(f"  Saved daily digest: {daily_file}")
+    # Collect unique source names across all days
+    all_sources: set[str] = set()
+    for day in days:
+        for a in day["articles"]:
+            all_sources.add(a.source)
+    sources = sorted(all_sources)
 
-    # Build index of all digests
-    digests = []
-    for d in sorted(OUTPUT_DIR.iterdir(), reverse=True):
-        if d.is_dir() and d.name != "static" and (d / "index.html").exists():
-            digests.append({
-                "date": d.name,
-                "path": f"{d.name}/index.html",
-                "article_count": "—",  # Could parse from file if needed
-            })
+    # Render single feed page
+    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
+    template = env.get_template("feed.html")
+    html = template.render(days=days, sources=sources)
 
-    index_html = render_index(digests)
-    (OUTPUT_DIR / "index.html").write_text(index_html, encoding="utf-8")
-    print(f"  Updated index: {OUTPUT_DIR / 'index.html'}")
+    output_file = OUTPUT_DIR / "index.html"
+    output_file.write_text(html, encoding="utf-8")
+    print(f"  Saved feed: {output_file} ({sum(d['count'] for d in days)} total articles across {len(days)} days)")
 
-    return daily_file
+    return output_file

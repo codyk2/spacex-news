@@ -19,7 +19,7 @@ def main():
     print("=" * 50)
 
     # 1. Collect articles from all sources
-    articles = collect_all(hours=24)
+    articles = collect_all(hours=36)
 
     if not articles:
         print("\n[!] No articles found. Generating empty digest.")
