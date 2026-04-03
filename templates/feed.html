@@ -17,32 +17,48 @@
                 <button class="filter-chip" data-filter="topic" data-value="falcon">Falcon</button>
                 <button class="filter-chip" data-filter="topic" data-value="launch">Launches</button>
                 <button class="filter-chip" data-filter="topic" data-value="ipo">Business</button>
-                <span class="filter-divider"></span>
-                {% for source in sources %}
-                <button class="filter-chip source-chip" data-filter="source" data-value="{{ source }}">{{ source }}</button>
-                {% endfor %}
+                <div class="source-dropdown">
+                    <button class="filter-chip source-toggle" id="source-toggle">Sources</button>
+                    <div class="source-menu" id="source-menu">
+                        {% for source in sources %}
+                        <button class="source-option" data-filter="source" data-value="{{ source }}">{{ source }}</button>
+                        {% endfor %}
+                    </div>
+                </div>
             </div>
+            <span class="active-source-tag" id="active-source-tag" hidden></span>
         </div>
     </nav>
 
     <main>
+        <!-- Daily Digest Carousel -->
+        {% if days %}
+        <section class="digest-carousel" id="digest-carousel">
+            <div class="digest-nav">
+                <button class="digest-arrow" id="digest-prev" aria-label="Previous day">&larr;</button>
+                <div class="digest-date" id="digest-date"></div>
+                <button class="digest-arrow" id="digest-next" aria-label="Next day">&rarr;</button>
+            </div>
+            {% for day in days %}
+            <article class="digest-panel {% if loop.first %}active{% endif %}" data-day-index="{{ loop.index0 }}" data-date="{{ day.date_display }}">
+                <div class="digest-text">
+                    {{ day.briefing_html }}
+                </div>
+            </article>
+            {% endfor %}
+        </section>
+        {% endif %}
+
+        <!-- Filter status -->
         <p class="filter-status" id="filter-status" hidden></p>
 
+        <!-- Article cards by day -->
         {% for day in days %}
         <section class="day-section" id="{{ day.date_key }}">
             <div class="day-header">
                 <h2>{{ day.date_display }}</h2>
                 <span class="day-count">{{ day.count }} stories</span>
             </div>
-
-            {% if day.briefing_html and day.has_real_briefing %}
-            <details class="ai-brief">
-                <summary>AI Briefing</summary>
-                <div class="ai-brief-content">
-                    {{ day.briefing_html }}
-                </div>
-            </details>
-            {% endif %}
 
             <div class="card-grid">
                 {% for article in day.articles %}
@@ -69,6 +85,34 @@
 
     <script>
     (function() {
+        /* === Digest Carousel === */
+        const panels = document.querySelectorAll('.digest-panel');
+        const dateEl = document.getElementById('digest-date');
+        const prevBtn = document.getElementById('digest-prev');
+        const nextBtn = document.getElementById('digest-next');
+        let currentIndex = 0;
+
+        function showPanel(i) {
+            panels.forEach(p => p.classList.remove('active'));
+            panels[i].classList.add('active');
+            dateEl.textContent = panels[i].dataset.date;
+            prevBtn.disabled = i === panels.length - 1;
+            nextBtn.disabled = i === 0;
+            currentIndex = i;
+        }
+
+        if (panels.length) {
+            showPanel(0);
+            // Older = higher index (days array is newest-first)
+            prevBtn.addEventListener('click', () => {
+                if (currentIndex < panels.length - 1) showPanel(currentIndex + 1);
+            });
+            nextBtn.addEventListener('click', () => {
+                if (currentIndex > 0) showPanel(currentIndex - 1);
+            });
+        }
+
+        /* === Card Filters === */
         const topicKeywords = {
             starship: ['starship', 'superheavy', 'super heavy', 'raptor', 'starbase', 'boca chica', 'mechazilla', 'booster catch'],
             starlink: ['starlink', 'satellite', 'constellation', 'direct to cell', 'direct-to-cell'],
@@ -83,42 +127,22 @@
         function applyFilters() {
             const cards = document.querySelectorAll('.card');
             let visible = 0;
-
             cards.forEach(card => {
                 const text = card.dataset.text || '';
                 const source = card.dataset.source || '';
-
-                let topicMatch = activeTopic === 'all';
-                if (!topicMatch) {
-                    const keywords = topicKeywords[activeTopic] || [];
-                    topicMatch = keywords.some(kw => text.includes(kw));
-                }
-
+                let topicMatch = activeTopic === 'all' || (topicKeywords[activeTopic] || []).some(kw => text.includes(kw));
                 let sourceMatch = !activeSource || source === activeSource;
-
-                if (topicMatch && sourceMatch) {
-                    card.style.display = '';
-                    visible++;
-                } else {
-                    card.style.display = 'none';
-                }
+                if (topicMatch && sourceMatch) { card.style.display = ''; visible++; }
+                else { card.style.display = 'none'; }
             });
-
-            document.querySelectorAll('.day-section').forEach(section => {
-                const visibleCards = section.querySelectorAll('.card:not([style*="display: none"])');
-                section.style.display = visibleCards.length ? '' : 'none';
+            document.querySelectorAll('.day-section').forEach(s => {
+                s.style.display = s.querySelectorAll('.card:not([style*="display: none"])').length ? '' : 'none';
             });
-
             const status = document.getElementById('filter-status');
-            if (activeTopic === 'all' && !activeSource) {
-                status.hidden = true;
-            } else {
-                status.hidden = false;
-                status.textContent = visible + ' matching stories';
-            }
+            if (activeTopic === 'all' && !activeSource) { status.hidden = true; }
+            else { status.hidden = false; status.textContent = visible + ' matching stories'; }
         }
 
-        // Topic chips: single select with "All" as reset
         document.querySelectorAll('.filter-chip[data-filter="topic"]').forEach(chip => {
             chip.addEventListener('click', () => {
                 document.querySelectorAll('.filter-chip[data-filter="topic"]').forEach(c => c.classList.remove('active'));
@@ -128,19 +152,53 @@
             });
         });
 
-        // Source chips: toggle on/off (click again to deselect)
-        document.querySelectorAll('.filter-chip[data-filter="source"]').forEach(chip => {
-            chip.addEventListener('click', () => {
-                const wasActive = chip.classList.contains('active');
-                document.querySelectorAll('.filter-chip[data-filter="source"]').forEach(c => c.classList.remove('active'));
+        /* === Source Dropdown === */
+        const sourceToggle = document.getElementById('source-toggle');
+        const sourceMenu = document.getElementById('source-menu');
+        const sourceTag = document.getElementById('active-source-tag');
+
+        sourceToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            sourceMenu.classList.toggle('open');
+        });
+
+        document.addEventListener('click', () => {
+            sourceMenu.classList.remove('open');
+        });
+
+        sourceMenu.addEventListener('click', (e) => e.stopPropagation());
+
+        document.querySelectorAll('.source-option').forEach(opt => {
+            opt.addEventListener('click', () => {
+                const wasActive = opt.classList.contains('active');
+                document.querySelectorAll('.source-option').forEach(o => o.classList.remove('active'));
+
                 if (wasActive) {
                     activeSource = null;
+                    sourceToggle.textContent = 'Sources';
+                    sourceToggle.classList.remove('active');
+                    sourceTag.hidden = true;
                 } else {
-                    chip.classList.add('active');
-                    activeSource = chip.dataset.value;
+                    opt.classList.add('active');
+                    activeSource = opt.dataset.value;
+                    sourceToggle.textContent = opt.dataset.value;
+                    sourceToggle.classList.add('active');
+                    sourceTag.textContent = opt.dataset.value + ' ×';
+                    sourceTag.hidden = false;
                 }
+
+                sourceMenu.classList.remove('open');
                 applyFilters();
             });
+        });
+
+        sourceTag.addEventListener('click', () => {
+            activeSource = null;
+            sourceToggle.textContent = 'Sources';
+            sourceToggle.classList.remove('active');
+            sourceTag.hidden = true;
+            document.querySelectorAll('.source-option').forEach(o => o.classList.remove('active'));
+            applyFilters();
         });
     })();
     </script>

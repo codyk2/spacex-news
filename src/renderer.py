@@ -115,13 +115,16 @@ def save_daily(briefing_md: str, articles: list[Article], date: datetime | None 
         day_date = datetime.strptime(day_key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         day_articles = [_dict_to_article(d) for d in day_data["articles"]]
         briefing_raw = day_data.get("briefing", "")
-        has_real_briefing = briefing_raw and "AI summary unavailable" not in briefing_raw
+        # Convert plain paragraphs to <p> tags
+        if briefing_raw and not briefing_raw.startswith("#"):
+            briefing_html = "\n".join(f"<p>{p.strip()}</p>" for p in briefing_raw.split("\n\n") if p.strip())
+        else:
+            briefing_html = _markdown_to_html(briefing_raw) if briefing_raw else ""
         days.append({
             "date_key": day_key,
             "date_display": day_date.strftime("%A, %B %d"),
             "is_today": day_key == date_str,
-            "briefing_html": Markup(_markdown_to_html(briefing_raw)) if has_real_briefing else "",
-            "has_real_briefing": has_real_briefing,
+            "briefing_html": Markup(briefing_html),
             "articles": day_articles,
             "count": len(day_articles),
         })
